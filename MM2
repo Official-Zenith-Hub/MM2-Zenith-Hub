@@ -734,7 +734,7 @@ pcall(function() WindUI:SetTheme(themeName) end)
 -- ==================================================
 -- ปุ่มโลโก้เปิด/ปิดหน้าต่าง (รูปโลโก้ Zenith Hub มุมโค้ง ลากย้ายได้)
 -- ==================================================
-local LOGO_ID = "88147388173113"
+local LOGO_ID = "94326769122805"
 local windowOpen = true
 
 local function toggleWindow()

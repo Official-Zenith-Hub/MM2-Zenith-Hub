@@ -1052,6 +1052,16 @@ safe("ESP", function()
     local gunEsp = nil
     local tracerConn = nil
 
+    -- ฮิตบล็อก: ตัวแปรสถานะ
+    local hitboxOn, hitboxes = false, {}
+    local hbxOn, hbxAll, hbxSize = false, false, 10
+    local hbxOriginal = {}
+
+    -- ให้ระบบอ่านบทบาททำงานเมื่อมีฟีเจอร์ที่ต้องใช้บทบาทเปิดอยู่
+    local function syncRoleFlag()
+        flags.esp = espOn or hitboxOn or hbxOn
+    end
+
     removeOld("ZenithESP")
     local espParent = workspace.CurrentCamera
     pcall(function()
@@ -1065,6 +1075,7 @@ safe("ESP", function()
     espFolder.Name = "ZenithESP"
     espFolder.Parent = espParent
 
+    -- ---------- ESP ผู้เล่น ----------
     local function clearESP(p)
         local obj = espObjects[p]
         if obj then
@@ -1180,6 +1191,7 @@ safe("ESP", function()
         end
     end
 
+    -- ---------- ESP ปืนที่ตก + เหรียญ ----------
     local function clearGunEsp()
         if gunEsp then
             gunEsp.box:Destroy()
@@ -1270,6 +1282,123 @@ safe("ESP", function()
         end
     end
 
+    -- ---------- ฮิตบล็อกแบบวาดกล่อง (ปรับขนาด/สี/ความโปร่งใสได้) ----------
+    local hbW, hbH, hbD = 100, 100, 100 -- เปอร์เซ็นต์ของขนาดตัวละครจริง
+    local hbTransp, hbRoleColor, hbRange = 0.6, true, 300
+    local hbColor = Color3.fromRGB(80, 160, 255)
+
+    local function clearHitbox(p)
+        local b = hitboxes[p]
+        if b then
+            b:Destroy()
+            hitboxes[p] = nil
+        end
+    end
+
+    local function clearAllHitboxes()
+        for p in pairs(hitboxes) do clearHitbox(p) end
+    end
+
+    local function updateHitboxes()
+        if not hitboxOn or (rolesOk and not roundActive()) then
+            clearAllHitboxes()
+            return
+        end
+        local myRoot = getRoot()
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player then
+                local char = p.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local inRange = true
+                if myRoot and root then
+                    inRange = (root.Position - myRoot.Position).Magnitude <= hbRange
+                end
+
+                if not (hum and root and hum.Health > 0 and isAlive(p) and inRange) then
+                    clearHitbox(p)
+                else
+                    local box = hitboxes[p]
+                    if box and box.Adornee ~= root then
+                        clearHitbox(p)
+                        box = nil
+                    end
+                    if not box then
+                        box = Instance.new("BoxHandleAdornment")
+                        box.Adornee = root
+                        box.AlwaysOnTop = true
+                        box.ZIndex = 4
+                        box.Parent = espFolder
+                        hitboxes[p] = box
+                    end
+
+                    local bbCF, bbSize = char:GetBoundingBox()
+                    box.CFrame = root.CFrame:ToObjectSpace(bbCF)
+                    box.Size = Vector3.new(
+                        bbSize.X * hbW / 100,
+                        bbSize.Y * hbH / 100,
+                        bbSize.Z * hbD / 100
+                    )
+                    box.Transparency = hbTransp
+                    if hbRoleColor then
+                        box.Color3 = ROLE_COLORS[getRole(p) or "Innocent"]
+                    else
+                        box.Color3 = hbColor
+                    end
+                end
+            end
+        end
+    end
+
+    -- ---------- ฮิตบล็อกขยายจริง (ทดลอง) ----------
+    local function restoreHbx(p)
+        local data = hbxOriginal[p]
+        if data then
+            local part = data.part
+            if part and part.Parent then
+                pcall(function()
+                    part.Size = data.Size
+                    part.Transparency = data.Transparency
+                    part.CanCollide = data.CanCollide
+                    part.Massless = data.Massless
+                end)
+            end
+            hbxOriginal[p] = nil
+        end
+    end
+
+    local function applyHbx()
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player then
+                local char = p.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local want = hbxOn and root and isAlive(p) and inRound()
+                    and (hbxAll or getRole(p) == "Murderer")
+
+                if want then
+                    local data = hbxOriginal[p]
+                    if not data or data.part ~= root then
+                        restoreHbx(p)
+                        hbxOriginal[p] = {
+                            part = root,
+                            Size = root.Size,
+                            Transparency = root.Transparency,
+                            CanCollide = root.CanCollide,
+                            Massless = root.Massless,
+                        }
+                    end
+                    root.Size = Vector3.new(hbxSize, hbxSize, hbxSize)
+                    root.Transparency = 0.7
+                    root.CanCollide = false
+                    root.Massless = true
+                else
+                    restoreHbx(p)
+                end
+            end
+        end
+    end
+
+    -- ---------- เส้นชี้ตัว (Tracer) ----------
     local function updateTracers()
         local cam = workspace.CurrentCamera
         for p, line in pairs(tracers) do
@@ -1302,24 +1431,32 @@ safe("ESP", function()
         end
     end
 
+    -- ---------- ลูปอัปเดตหลัก ----------
     task.spawn(function()
         while alive and espFolder.Parent do
-            task.wait(0.25)
+            task.wait(0.2)
             if espOn then pcall(updateESP) end
+            if hitboxOn or next(hitboxes) then pcall(updateHitboxes) end
+            if hbxOn or next(hbxOriginal) then pcall(applyHbx) end
             if gunEspOn or coinEspOn or gunEsp or next(coinEsps) then
                 pcall(updateItemESP)
             end
         end
     end)
 
-    track(Players.PlayerRemoving:Connect(clearESP))
+    track(Players.PlayerRemoving:Connect(function(p)
+        clearESP(p)
+        clearHitbox(p)
+        hbxOriginal[p] = nil
+    end))
 
     table.insert(cleanups, function()
         if tracerConn then tracerConn:Disconnect() end
         for _, line in pairs(tracers) do pcall(function() line:Remove() end) end
+        for p in pairs(hbxOriginal) do restoreHbx(p) end
     end)
 
-    -- ป้ายชี้ปืนบนหน้าจอ (เห็นแน่นอน แม้ไฮไลต์ไม่แสดง)
+    -- ---------- ป้ายชี้ปืนบนหน้าจอ (เห็นแน่นอน แม้ไฮไลต์ไม่แสดง) ----------
     removeOld("ZenithGunHud")
     local hud = Instance.new("ScreenGui")
     hud.Name = "ZenithGunHud"
@@ -1364,12 +1501,14 @@ safe("ESP", function()
         marker.Visible = true
     end))
 
+    -- [จบ ESP ส่วน 1/2]
+    -- ==================== ปุ่ม/สวิตช์ในเมนู ====================
     Tab:Toggle({
         Title = "เปิด ESP ผู้เล่น",
         Value = false,
         Callback = function(state)
             espOn = state
-            flags.esp = state
+            syncRoleFlag()
             if not state then
                 clearAllESP()
             else
@@ -1420,9 +1559,77 @@ safe("ESP", function()
 
     Tab:Toggle({ Title = "ESP ปืนที่ตก", Value = false, Callback = function(s) gunEspOn = s end })
     Tab:Toggle({ Title = "ESP เหรียญ", Value = false, Callback = function(s) coinEspOn = s end })
+
+    -- ---------- ตั้งค่าฮิตบล็อก (วาดกล่อง) ----------
+    Tab:Toggle({
+        Title = "ESP ฮิตบล็อก (กล่องรอบตัวผู้เล่น)",
+        Value = false,
+        Callback = function(state)
+            hitboxOn = state
+            syncRoleFlag()
+            if not state then clearAllHitboxes() end
+        end,
+    })
+    Tab:Slider({
+        Title = "ฮิตบล็อก: ความกว้าง (%)",
+        Value = { Min = 50, Max = 300, Default = 100 },
+        Callback = function(v) hbW = v end,
+    })
+    Tab:Slider({
+        Title = "ฮิตบล็อก: ความสูง (%)",
+        Value = { Min = 50, Max = 300, Default = 100 },
+        Callback = function(v) hbH = v end,
+    })
+    Tab:Slider({
+        Title = "ฮิตบล็อก: ความลึก (%)",
+        Value = { Min = 50, Max = 300, Default = 100 },
+        Callback = function(v) hbD = v end,
+    })
+    Tab:Slider({
+        Title = "ฮิตบล็อก: ความโปร่งใส (%)",
+        Value = { Min = 0, Max = 95, Default = 60 },
+        Callback = function(v) hbTransp = v / 100 end,
+    })
+    Tab:Slider({
+        Title = "ฮิตบล็อก: ระยะแสดงสูงสุด (เมตร)",
+        Value = { Min = 20, Max = 500, Default = 300 },
+        Callback = function(v) hbRange = v end,
+    })
+    Tab:Toggle({
+        Title = "ฮิตบล็อก: ใช้สีตามบทบาท",
+        Value = true,
+        Callback = function(s) hbRoleColor = s end,
+    })
+    pcall(function()
+        Tab:Colorpicker({
+            Title = "ฮิตบล็อก: สีที่เลือกเอง (ใช้เมื่อปิดสีตามบทบาท)",
+            Default = Color3.fromRGB(80, 160, 255),
+            Callback = function(color) hbColor = color end,
+        })
+    end)
+
+    -- ---------- ตั้งค่าฮิตบล็อกขยายจริง (ทดลอง) ----------
+    Tab:Toggle({
+        Title = "ขยายฮิตบล็อกจริง (ทดลอง)",
+        Value = false,
+        Callback = function(state)
+            hbxOn = state
+            syncRoleFlag()
+        end,
+    })
+    Tab:Slider({
+        Title = "ขนาดฮิตบล็อกที่ขยาย",
+        Value = { Min = 2, Max = 40, Default = 10 },
+        Callback = function(v) hbxSize = v end,
+    })
+    Tab:Toggle({
+        Title = "ขยายทุกคน (ปิด = เฉพาะฆาตกร)",
+        Value = false,
+        Callback = function(state) hbxAll = state end,
+    })
 end)
 
--- [จบส่วนที่ 5/6]
+-- [จบ ESP ส่วน 2/2]
 
 -- ==================================================
 -- แท็บ: ฟาร์ม
@@ -1814,3 +2021,5 @@ pcall(function() Window:SelectTab(1) end)
 print("[Zenith Hub] โหลดครบทุกแท็บแล้ว")
 
 -- [จบส่วนที่ 6/6]
+
+

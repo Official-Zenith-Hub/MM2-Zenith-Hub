@@ -1,0 +1,1816 @@
+--[[ Zenith Hub MM2 (WindUI) - ภาษาไทย v7 ]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+
+-- ปิดของเวอร์ชันเก่าที่ยังรันค้างอยู่ (กันลูป/ปุ่มซ้อนกันเวลารันซ้ำ)
+local env = (getgenv and getgenv()) or _G
+if env.ZenithCleanup then pcall(env.ZenithCleanup) end
+
+local alive = true
+local connections, cleanups = {}, {}
+local Window
+
+local function track(conn)
+    table.insert(connections, conn)
+    return conn
+end
+
+local okLoad, WindUI = pcall(function()
+    return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+if not okLoad or not WindUI then
+    warn("โหลด WindUI ไม่สำเร็จ:", WindUI)
+    return
+end
+
+-- ==================================================
+-- ตัวช่วยทั่วไป
+-- ==================================================
+local function getGuiParent()
+    local ok, parent = pcall(function()
+        return (gethui and gethui()) or game:GetService("CoreGui")
+    end)
+    return ok and parent or player:WaitForChild("PlayerGui")
+end
+
+local function removeOld(name)
+    local parents = { player:WaitForChild("PlayerGui"), workspace.CurrentCamera, getGuiParent() }
+    pcall(function() table.insert(parents, game:GetService("CoreGui")) end)
+    for _, parent in ipairs(parents) do
+        pcall(function()
+            local old = parent:FindFirstChild(name)
+            if old then old:Destroy() end
+        end)
+    end
+end
+
+env.ZenithCleanup = function()
+    alive = false
+    for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    for _, fn in ipairs(cleanups) do pcall(fn) end
+    for _, n in ipairs({ "ZenithShootGui", "ZenithKnifeGui", "ZenithAskLock", "ZenithGunHud", "ZenithESP" }) do
+        pcall(removeOld, n)
+    end
+    pcall(function() if Window then Window:Destroy() end end)
+end
+
+local function notify(text, secs)
+    WindUI:Notify({ Title = "Zenith Hub", Content = text, Duration = secs or 3 })
+end
+
+local function safe(name, fn)
+    local ok, err = pcall(fn)
+    if not ok then warn("[Zenith Hub] แท็บ " .. name .. " ผิดพลาด:", err) end
+    task.wait()
+end
+
+local function getHumanoid()
+    local char = player.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+    local char = player.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function hasTool(p, name)
+    local c = p.Character
+    return (c and c:FindFirstChild(name)) or p.Backpack:FindFirstChild(name)
+end
+
+local function equipTool(name)
+    local tool = hasTool(player, name)
+    local hum = getHumanoid()
+    if tool and hum and tool.Parent ~= player.Character then
+        hum:EquipTool(tool)
+        task.wait(0.15)
+    end
+    return tool
+end
+
+-- ==================================================
+-- ระบบบทบาท (ถามข้อมูลจากเกมโดยตรง)
+-- ==================================================
+local flags = {}
+local roles = {}
+local rolesOk = false
+local rolesRemote, remoteScanAt = nil, 0
+local lastRoleRefresh = 0
+
+local function findRolesRemote()
+    if rolesRemote and rolesRemote.Parent then return rolesRemote end
+    if tick() - remoteScanAt < 5 then return nil end
+    remoteScanAt = tick()
+    local r = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+    if r and r:IsA("RemoteFunction") then rolesRemote = r end
+    return rolesRemote
+end
+
+local function refreshRoles(force)
+    if not force and tick() - lastRoleRefresh < 1 then return end
+    lastRoleRefresh = tick()
+    local fn = findRolesRemote()
+    if not fn then return end
+    local ok, data = pcall(function() return fn:InvokeServer() end)
+    if ok and typeof(data) == "table" then
+        local new = {}
+        for name, info in pairs(data) do
+            if typeof(info) == "table" then
+                new[name] = { role = info.Role or info.role, dead = info.Dead or info.dead }
+            end
+        end
+        roles = new
+        rolesOk = true
+    end
+end
+
+-- คืนค่า "Murderer" / "Sheriff" / "Hero" / "Innocent" หรือ nil (ยังไม่เริ่มรอบ)
+local function getRole(p)
+    local info = roles[p.Name]
+    local r = info and info.role
+    if r == "Murderer" or r == "Sheriff" or r == "Hero" or r == "Innocent" then
+        return r
+    end
+    local c = p.Character
+    if c and c:FindFirstChild("Knife") then return "Murderer" end
+    if c and c:FindFirstChild("Gun") then return "Sheriff" end
+    return nil
+end
+
+local function roundActive()
+    for _, p in ipairs(Players:GetPlayers()) do
+        local r = getRole(p)
+        if r == "Murderer" or r == "Sheriff" or r == "Hero" then return true end
+    end
+    return false
+end
+
+-- อยู่ในรอบหรือไม่ (ถ้าอ่านบทบาทไม่ได้ ถือว่าอยู่ในรอบไว้ก่อน)
+local function inRound()
+    return (not rolesOk) or roundActive()
+end
+
+local function isAlive(p)
+    local info = roles[p.Name]
+    if info and info.dead then return false end
+    local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0
+end
+
+local function getMurderer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and getRole(p) == "Murderer" and isAlive(p) then
+            return p
+        end
+    end
+end
+
+local function getNearestPlayer()
+    local root = getRoot()
+    if not root then return end
+    local best, bestDist
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and p.Character and isAlive(p) then
+            local h = p.Character:FindFirstChild("HumanoidRootPart")
+            if h then
+                local d = (h.Position - root.Position).Magnitude
+                if not bestDist or d < bestDist then
+                    best, bestDist = p, d
+                end
+            end
+        end
+    end
+    return best
+end
+
+task.spawn(function()
+    while alive do
+        task.wait(1)
+        if flags.esp or flags.grab or flags.autoShoot or flags.farm or flags.autoThrow then
+            pcall(refreshRoles, true)
+        end
+    end
+end)
+
+-- [จบส่วนที่ 1/6]
+
+-- ==================================================
+-- ปืนที่ตก (หาแบบยืดหยุ่น ไม่ผูกกับชื่อเดียว)
+-- ==================================================
+local gunCache, gunScanAt, gunNameOverride = nil, 0, nil
+
+local function findGunNow()
+    -- 0) ชื่อที่ผู้ใช้ตั้งเอง
+    if gunNameOverride then
+        local o = workspace:FindFirstChild(gunNameOverride, true)
+        if o then return o end
+    end
+    -- 1) ตำแหน่งปกติ (ลูกของ workspace โดยตรง)
+    local d = workspace:FindFirstChild("GunDrop") or workspace:FindFirstChild("Gun")
+    if d then return d end
+    -- 2) ซ้อนอยู่ข้างในโฟลเดอร์/โมเดลอื่น
+    return workspace:FindFirstChild("GunDrop", true)
+end
+
+local function getGunObject()
+    if gunCache and gunCache:IsDescendantOf(workspace) then return gunCache end
+    gunCache = nil
+    if tick() - gunScanAt < 1 then return nil end
+    gunScanAt = tick()
+    gunCache = findGunNow()
+    return gunCache
+end
+
+local function getGunPart()
+    local d = getGunObject()
+    if not d then return nil end
+    if d:IsA("BasePart") then return d end
+    return d:FindFirstChildWhichIsA("BasePart", true)
+end
+
+track(workspace.ChildAdded:Connect(function(child)
+    if child.Name == "GunDrop" or child.Name == "Gun" then
+        gunCache = child
+    end
+end))
+
+-- ==================================================
+-- เหรียญ
+-- ==================================================
+local coinContainerCache, coinScanAt = nil, 0
+local function getCoinContainer()
+    if coinContainerCache and coinContainerCache.Parent then return coinContainerCache end
+    if tick() - coinScanAt < 2 then return nil end
+    coinScanAt = tick()
+    for _, m in ipairs(workspace:GetChildren()) do
+        local c = m:FindFirstChild("CoinContainer")
+        if c then
+            coinContainerCache = c
+            return c
+        end
+    end
+    coinContainerCache = workspace:FindFirstChild("CoinContainer", true)
+    return coinContainerCache
+end
+
+local function getCoins()
+    local coins = {}
+    local container = getCoinContainer()
+    if container then
+        for _, c in ipairs(container:GetDescendants()) do
+            if c:IsA("BasePart") and c.Name == "Coin_Server" then
+                table.insert(coins, c)
+            end
+        end
+    end
+    return coins
+end
+
+local grabbing = false
+
+-- ==================================================
+-- ยิงปืน / ขว้างมีด (มีตัวสำรองหลายแบบ)
+-- ==================================================
+local function shootMurderer()
+    refreshRoles(true)
+    local murderer = getMurderer()
+    if not murderer then return false, "ไม่เจอฆาตกร (ยังไม่เริ่มรอบหรือตายแล้ว)" end
+    if not hasTool(player, "Gun") then return false, "คุณไม่มีปืน" end
+    local hrp = murderer.Character and murderer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false, "ไม่เจอตัวฆาตกร" end
+    local gun = equipTool("Gun")
+    if not gun then return false, "หยิบปืนไม่ได้" end
+
+    local root = getRoot()
+    local aimPos = hrp.Position + hrp.AssemblyLinearVelocity * 0.1
+    local shootGunRemote = gun:FindFirstChild("ShootGun", true)
+
+    local candidates = {
+        function() gun.KnifeLocal.CreateBeam.RemoteFunction:InvokeServer(1, aimPos, "AH2") end,
+        function() shootGunRemote:InvokeServer(1, aimPos, "AH2") end,
+        function() gun.Shoot:FireServer(CFrame.new(root.Position), CFrame.new(aimPos)) end,
+    }
+    for _, f in ipairs(candidates) do
+        if pcall(f) then return true end
+    end
+    return false, "คำสั่งยิงของเกมเปลี่ยน (กดปุ่ม ตรวจระบบ ในแท็บ อื่นๆ)"
+end
+
+local function throwKnife()
+    if not hasTool(player, "Knife") then return false, "คุณไม่ใช่ฆาตกร (ไม่มีมีด)" end
+    local target = getNearestPlayer()
+    if not target then return false, "ไม่เจอเป้าหมาย" end
+    local hrp = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    local root = getRoot()
+    if not (hrp and root) then return false, "ไม่เจอตัวเป้าหมาย" end
+    local knife = equipTool("Knife")
+    if not knife then return false, "หยิบมีดไม่ได้" end
+
+    local aimPos = hrp.Position + hrp.AssemblyLinearVelocity * 0.15
+    local from, to = CFrame.new(root.Position), CFrame.new(aimPos)
+
+    local candidates = {
+        function() knife.Throw:FireServer(from, to) end,
+        function() knife.Events.KnifeThrown:FireServer(from, to) end,
+        function() knife.KnifeServer.KnifeServer:FireServer(aimPos, knife.Handle.Position) end,
+    }
+    for _, f in ipairs(candidates) do
+        if pcall(f) then return true end
+    end
+    return false, "คำสั่งขว้างมีดของเกมเปลี่ยน (กดปุ่ม ตรวจระบบ ในแท็บ อื่นๆ)"
+end
+
+-- ==================================================
+-- เช็กว่ากำลังเล่นอยู่ในรอบไหม (ตายแล้ว/อยู่ล็อบบี้ เกมไม่ให้ยิงหรือเก็บปืน)
+-- ==================================================
+local function amPlaying()
+    local hum = getHumanoid()
+    if not hum or hum.Health <= 0 then return false end
+    local info = roles[player.Name]
+    if info and info.dead then return false end
+    if rolesOk then
+        return getRole(player) ~= nil and roundActive()
+    end
+    return true
+end
+
+local rawShoot, rawThrow = shootMurderer, throwKnife
+
+shootMurderer = function()
+    if not amPlaying() then
+        return false, "คุณตายแล้วหรืออยู่ล็อบบี้ ยิงไม่ได้"
+    end
+    return rawShoot()
+end
+
+throwKnife = function()
+    if not amPlaying() then
+        return false, "คุณตายแล้วหรืออยู่ล็อบบี้ ขว้างมีดไม่ได้"
+    end
+    return rawThrow()
+end
+
+local function dumpRemotes()
+    print("===== Zenith Hub: ตรวจระบบ =====")
+    refreshRoles(true)
+    print("Remote บทบาท:", rolesRemote and rolesRemote:GetFullName() or "หาไม่เจอ", "| อ่านบทบาทได้:", rolesOk)
+    for _, toolName in ipairs({ "Gun", "Knife" }) do
+        local tool = hasTool(player, toolName)
+        if tool then
+            for _, d in ipairs(tool:GetDescendants()) do
+                if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+                    print(toolName, "->", d:GetFullName(), "[" .. d.ClassName .. "]")
+                end
+            end
+        else
+            print(toolName, "-> ไม่มีในตัวเรา")
+        end
+    end
+    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+        if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+            local n = d.Name:lower()
+            if n:find("shoot") or n:find("gun") or n:find("knife") or n:find("throw")
+                or n:find("role") or n:find("playerdata") then
+                print("RS ->", d:GetFullName(), "[" .. d.ClassName .. "]")
+            end
+        end
+    end
+    print("บทบาทที่อ่านได้:")
+    for name, info in pairs(roles) do print("  ", name, info.role, info.dead) end
+    print("วัตถุที่ชื่อมีคำว่า gun (ค้นลึกทั้งหมด):")
+    local n = 0
+    for i, c in ipairs(workspace:GetDescendants()) do
+        if c.Name:lower():find("gun") and (c:IsA("BasePart") or c:IsA("Model") or c:IsA("Tool")) then
+            print("  ", c:GetFullName(), "[" .. c.ClassName .. "]")
+            n += 1
+        end
+        if i % 500 == 0 then task.wait() end
+    end
+    print("เจอทั้งหมด", n, "ชิ้น")
+    local g = getGunObject()
+    print("ตัวหาปืนของสคริปต์:", g and g:GetFullName() or "ไม่เจอ")
+    print("CoinContainer:", getCoinContainer())
+    print("จำนวนเหรียญ:", #getCoins())
+    print("กำลังเล่นอยู่ในรอบ:", amPlaying())
+    print("================================")
+    notify("พิมพ์ผลตรวจที่ Console แล้ว")
+end
+
+-- [จบส่วนที่ 2/6]
+
+-- ==================================================
+-- ปุ่มลอย (มีตัวเลือกเพิ่มปุ่มล็อก)
+-- ==================================================
+local function askAddLock(onChoice)
+    removeOld("ZenithAskLock")
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ZenithAskLock"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 100
+    gui.Parent = getGuiParent()
+
+    local frame = Instance.new("Frame")
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.Position = UDim2.fromScale(0.5, 0.5)
+    frame.Size = UDim2.fromOffset(250, 130)
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 14)
+    local fs = Instance.new("UIStroke", frame)
+    fs.Color = Color3.fromRGB(0, 120, 255)
+    fs.Thickness = 2
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.Position = UDim2.fromOffset(0, 12)
+    title.Text = "เพิ่มปุ่มล็อกไหม?"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18
+    title.Parent = frame
+
+    local desc = Instance.new("TextLabel")
+    desc.BackgroundTransparency = 1
+    desc.Size = UDim2.new(1, -20, 0, 30)
+    desc.Position = UDim2.fromOffset(10, 44)
+    desc.Text = "ล็อกแล้วปุ่มลอยจะไม่ขยับเวลาแตะ"
+    desc.TextColor3 = Color3.fromRGB(190, 190, 200)
+    desc.Font = Enum.Font.Gotham
+    desc.TextSize = 13
+    desc.TextWrapped = true
+    desc.Parent = frame
+
+    local function makeBtn(text, x, color, value)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(100, 34)
+        b.Position = UDim2.fromOffset(x, 84)
+        b.BackgroundColor3 = color
+        b.Text = text
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 15
+        b.Parent = frame
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
+        b.Activated:Connect(function()
+            gui:Destroy()
+            onChoice(value)
+        end)
+    end
+    makeBtn("เพิ่ม", 15, Color3.fromRGB(40, 160, 80), true)
+    makeBtn("ไม่เพิ่ม", 135, Color3.fromRGB(90, 90, 100), false)
+end
+
+local function makeFloatingButton(cfg)
+    removeOld(cfg.name)
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = cfg.name
+    gui.ResetOnSpawn = false
+    gui.Enabled = false
+    gui.Parent = getGuiParent()
+
+    local holder = Instance.new("Frame")
+    holder.Size = UDim2.fromOffset(96, 96)
+    holder.Position = cfg.pos
+    holder.BackgroundTransparency = 1
+    holder.Parent = gui
+
+    local glow = Instance.new("Frame")
+    glow.Size = UDim2.fromScale(1, 1)
+    glow.BackgroundColor3 = cfg.glow
+    glow.BackgroundTransparency = 0.8
+    glow.Parent = holder
+    Instance.new("UICorner", glow).CornerRadius = UDim.new(1, 0)
+
+    local btn = Instance.new("TextButton")
+    btn.AnchorPoint = Vector2.new(0.5, 0.5)
+    btn.Position = UDim2.fromScale(0.5, 0.5)
+    btn.Size = UDim2.fromOffset(80, 80)
+    btn.BackgroundColor3 = Color3.new(1, 1, 1)
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = holder
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+
+    local normalColor = ColorSequence.new(cfg.top, cfg.bottom)
+    local grayColor = ColorSequence.new(Color3.fromRGB(120, 120, 120), Color3.fromRGB(60, 60, 60))
+
+    local grad = Instance.new("UIGradient", btn)
+    grad.Rotation = 90
+    grad.Color = normalColor
+
+    local stroke = Instance.new("UIStroke", btn)
+    stroke.Thickness = 3
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Color = Color3.new(1, 1, 1)
+    local strokeGrad = Instance.new("UIGradient", stroke)
+    strokeGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(0.5, cfg.top),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255)),
+    })
+
+    local icon = Instance.new("TextLabel")
+    icon.BackgroundTransparency = 1
+    icon.Size = UDim2.new(1, 0, 0.55, 0)
+    icon.Position = UDim2.fromScale(0, 0.08)
+    icon.Text = cfg.icon
+    icon.TextSize = 30
+    icon.Font = Enum.Font.GothamBold
+    icon.Parent = btn
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.new(1, 0, 0.3, 0)
+    label.Position = UDim2.fromScale(0, 0.58)
+    label.Text = cfg.text
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 13
+    label.Font = Enum.Font.GothamBold
+    label.TextStrokeTransparency = 0.5
+    label.Parent = btn
+
+    -- ปุ่มล็อกตำแหน่ง (ซ่อนไว้ก่อน จะโชว์เมื่อผู้ใช้เลือก "เพิ่ม")
+    local locked = false
+    local lockBtn = Instance.new("TextButton")
+    lockBtn.Size = UDim2.fromOffset(30, 30)
+    lockBtn.Position = UDim2.new(1, -30, 0, 0)
+    lockBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    lockBtn.Text = "🔓"
+    lockBtn.TextSize = 16
+    lockBtn.Font = Enum.Font.GothamBold
+    lockBtn.Visible = false
+    lockBtn.ZIndex = 5
+    lockBtn.Parent = holder
+    Instance.new("UICorner", lockBtn).CornerRadius = UDim.new(1, 0)
+    local lockStroke = Instance.new("UIStroke", lockBtn)
+    lockStroke.Color = Color3.new(1, 1, 1)
+    lockStroke.Thickness = 2
+
+    lockBtn.Activated:Connect(function()
+        locked = not locked
+        lockBtn.Text = locked and "🔒" or "🔓"
+        lockBtn.BackgroundColor3 = locked and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(40, 40, 50)
+        notify(locked and "ล็อกตำแหน่งปุ่มแล้ว" or "ปลดล็อกปุ่มแล้ว", 2)
+    end)
+
+    local function setLockVisible(v)
+        lockBtn.Visible = v
+        if not v then
+            locked = false
+            lockBtn.Text = "🔓"
+            lockBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        end
+    end
+
+    task.spawn(function()
+        local rot = 0
+        while alive and gui.Parent do
+            if gui.Enabled then
+                rot = (rot + 6) % 360
+                strokeGrad.Rotation = rot
+            end
+            task.wait(0.06)
+        end
+    end)
+
+    local cooling = false
+    local function fire()
+        if cooling then return end
+        cooling = true
+
+        TweenService:Create(btn, TweenInfo.new(0.08), { Size = UDim2.fromOffset(68, 68) }):Play()
+        task.delay(0.08, function()
+            TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Back), { Size = UDim2.fromOffset(80, 80) }):Play()
+        end)
+
+        task.spawn(cfg.onTap)
+
+        grad.Color = grayColor
+        label.Text = "รอ..."
+        task.delay(cfg.cooldown, function()
+            grad.Color = normalColor
+            label.Text = cfg.text
+            cooling = false
+        end)
+    end
+
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging, moved = true, false
+            dragStart = input.Position
+            startPos = holder.Position
+        end
+    end)
+
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and not locked and (input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 8 then moved = true end
+            if moved then
+                holder.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end))
+
+    track(UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1) then
+            dragging = false
+            if not moved then fire() end
+        end
+    end))
+
+    -- ตัวควบคุม: ตั้ง .Enabled ได้เหมือนเดิม แต่จะถามเรื่องปุ่มล็อกตอนเปิด
+    return setmetatable({}, {
+        __index = function(_, k)
+            if k == "Enabled" then return gui.Enabled end
+        end,
+        __newindex = function(_, k, v)
+            if k == "Enabled" then
+                gui.Enabled = v
+                if v then
+                    askAddLock(function(add) setLockVisible(add) end)
+                else
+                    removeOld("ZenithAskLock")
+                    setLockVisible(false)
+                end
+            end
+        end,
+    })
+end
+
+local shootGui, knifeGui
+
+safe("ปุ่มลอย", function()
+    shootGui = makeFloatingButton({
+        name = "ZenithShootGui",
+        text = "ยิงฆาตกร",
+        icon = "🎯",
+        top = Color3.fromRGB(255, 80, 90),
+        bottom = Color3.fromRGB(150, 10, 30),
+        glow = Color3.fromRGB(255, 40, 60),
+        pos = UDim2.new(1, -130, 0.5, -48),
+        cooldown = 1.2,
+        onTap = function()
+            local ok, why = shootMurderer()
+            if not ok then notify(why or "ยิงไม่ได้", 3) end
+        end,
+    })
+
+    knifeGui = makeFloatingButton({
+        name = "ZenithKnifeGui",
+        text = "ขว้างมีด",
+        icon = "🔪",
+        top = Color3.fromRGB(190, 90, 255),
+        bottom = Color3.fromRGB(80, 20, 150),
+        glow = Color3.fromRGB(170, 70, 255),
+        pos = UDim2.new(1, -130, 0.5, 60),
+        cooldown = 1.0,
+        onTap = function()
+            local ok, why = throwKnife()
+            if not ok then notify(why or "ขว้างมีดไม่ได้", 3) end
+        end,
+    })
+end)
+
+-- [จบส่วนที่ 3/6]
+
+-- ==================================================
+-- ธีมสีฟ้า (ถ้าเวอร์ชัน WindUI ไม่รองรับ จะใช้ธีม Dark แทน)
+-- ==================================================
+local themeName = "Dark"
+pcall(function()
+    WindUI:AddTheme({
+        Name = "ZenithBlue",
+        Accent = Color3.fromHex("#1E6BFF"),
+        Dialog = Color3.fromHex("#0B1E3F"),
+        Outline = Color3.fromHex("#2F7BFF"),
+        Text = Color3.fromHex("#EAF2FF"),
+        Placeholder = Color3.fromHex("#7F9CCB"),
+        Background = Color3.fromHex("#0A1A38"),
+        Button = Color3.fromHex("#1E5CD6"),
+        Icon = Color3.fromHex("#7DB2FF"),
+    })
+    themeName = "ZenithBlue"
+end)
+
+-- ==================================================
+-- หน้าต่างหลัก
+-- ==================================================
+local okWin, winOrErr = pcall(function()
+    return WindUI:CreateWindow({
+        Title = "Zenith Hub MM2",
+        Icon = "zap",
+        Author = "Zenith Hub",
+        Folder = "ZenithHubMM2",
+        Size = UDim2.fromOffset(540, 400),
+        Theme = themeName,
+    })
+end)
+if not okWin or not winOrErr then
+    warn("สร้างหน้าต่างไม่สำเร็จ:", winOrErr)
+    return
+end
+Window = winOrErr
+pcall(function() WindUI:SetTheme(themeName) end)
+
+-- ==================================================
+-- ปุ่มโลโก้เปิด/ปิดหน้าต่าง (รูปโลโก้ Zenith Hub มุมโค้ง ลากย้ายได้)
+-- ==================================================
+local LOGO_ID = "88147388173113"
+local windowOpen = true
+
+local function toggleWindow()
+    if not Window then return end
+    local ok = pcall(function() Window:Toggle() end)
+    if not ok then
+        windowOpen = not windowOpen
+        pcall(function()
+            if windowOpen then Window:Open() else Window:Close() end
+        end)
+    end
+end
+
+local function makeLogoButton()
+    removeOld("ZenithLogoGui")
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ZenithLogoGui"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 90
+    gui.Parent = getGuiParent()
+
+    local btn = Instance.new("ImageButton")
+    btn.Size = UDim2.fromOffset(56, 56)
+    btn.Position = UDim2.new(0, 14, 0.5, -28)
+    btn.BackgroundColor3 = Color3.fromRGB(10, 26, 56)
+    btn.Image = "rbxthumb://type=Asset&id=" .. LOGO_ID .. "&w=420&h=420"
+    btn.ScaleType = Enum.ScaleType.Crop
+    btn.AutoButtonColor = true
+    btn.Parent = gui
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 14)
+    local stroke = Instance.new("UIStroke", btn)
+    stroke.Color = Color3.fromRGB(47, 123, 255)
+    stroke.Thickness = 2
+
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging, moved = true, false
+            dragStart = input.Position
+            startPos = btn.Position
+        end
+    end)
+
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 8 then moved = true end
+            if moved then
+                btn.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end))
+
+    track(UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1) then
+            dragging = false
+            if not moved then toggleWindow() end
+        end
+    end))
+end
+
+local okLogo = pcall(makeLogoButton)
+pcall(function()
+    if okLogo then
+        -- ซ่อนปุ่มเปิดเดิมของ WindUI เพราะใช้ปุ่มโลโก้แทน
+        Window:EditOpenButton({ Enabled = false })
+    else
+        Window:EditOpenButton({
+            Title = "Zenith Hub",
+            Icon = "zap",
+            CornerRadius = UDim.new(0, 12),
+            StrokeThickness = 2,
+            Color = ColorSequence.new(Color3.fromRGB(47, 123, 255), Color3.fromRGB(10, 70, 200)),
+            Draggable = true,
+        })
+    end
+end)
+
+-- ==================================================
+-- แท็บ: นายอำเภอ
+-- ==================================================
+safe("นายอำเภอ", function()
+    local Tab = Window:Tab({ Title = "นายอำเภอ", Icon = "shield" })
+
+    local autoGrab, notifiedNoDrop, notifyGun = false, false, false
+    local retryAt, notifiedDead = 0, false
+
+    -- ---------- วาร์ปไปเก็บปืน ----------
+    Tab:Toggle({
+        Title = "วาร์ปไปเก็บปืน (เมื่อนายอำเภอตาย)",
+        Value = false,
+        Callback = function(state)
+            autoGrab = state
+            flags.grab = state
+            notifiedNoDrop = false
+            if state and not getGunPart() and not hasTool(player, "Gun") then
+                notifiedNoDrop = true
+                notify("ปืนยังไม่ drop")
+            end
+        end,
+    })
+
+    local function touchGun(r, drop)
+        if firetouchinterest then
+            pcall(function()
+                firetouchinterest(r, drop, 0)
+                firetouchinterest(r, drop, 1)
+            end)
+        end
+    end
+
+    task.spawn(function()
+        while alive do
+            task.wait(0.2)
+            if autoGrab and not grabbing and tick() >= retryAt then
+                local drop = getGunPart()
+                if not amPlaying() then
+                    -- ตายแล้ว/อยู่ล็อบบี้: เกมไม่ให้เก็บปืน หยุดรอ
+                    if drop and not notifiedDead then
+                        notifiedDead = true
+                        notify("ตายแล้วหรืออยู่ล็อบบี้ เก็บปืนไม่ได้ (จะทำงานเองรอบหน้า)", 4)
+                    end
+                else
+                    notifiedDead = false
+                    local root = getRoot()
+                    if not drop then
+                        if not notifiedNoDrop and not hasTool(player, "Gun") then
+                            notifiedNoDrop = true
+                            notify("ปืนยังไม่ drop")
+                        end
+                    else
+                        notifiedNoDrop = false
+                        if root and not hasTool(player, "Gun") and getRole(player) ~= "Murderer" then
+                            grabbing = true
+                            pcall(function()
+                                local back = root.CFrame
+
+                                -- แวบไปที่ปืน แล้วกลับทันทีที่ได้ปืน (เช็กทุกเฟรม)
+                                local t = 0
+                                while alive and t < 1.5 and drop.Parent and not hasTool(player, "Gun") do
+                                    local r = getRoot()
+                                    if not r then break end
+                                    r.CFrame = drop.CFrame
+                                    touchGun(r, drop)
+                                    t += RunService.Heartbeat:Wait()
+                                end
+
+                                local r2 = getRoot()
+                                if r2 then r2.CFrame = back end
+                            end)
+
+                            -- ถ้ายังไม่ได้ปืน พักก่อนค่อยลองใหม่
+                            if not hasTool(player, "Gun") and getGunPart() then
+                                retryAt = tick() + 4
+                            end
+                            grabbing = false
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- ---------- แจ้งเตือนเมื่อปืนตก ----------
+    Tab:Toggle({
+        Title = "แจ้งเตือนเมื่อปืนตก",
+        Value = false,
+        Callback = function(state) notifyGun = state end,
+    })
+
+    task.spawn(function()
+        local lastGun = nil
+        while alive do
+            task.wait(0.4)
+            if notifyGun then
+                local g = getGunPart()
+                if g and g ~= lastGun then
+                    notify("ปืนตกแล้ว! นายอำเภอตาย", 4)
+                end
+                lastGun = g
+            else
+                lastGun = nil
+            end
+        end
+    end)
+
+    -- ---------- ช่องตั้งชื่อปืนเอง (ถ้าหาไม่เจอ) ----------
+    pcall(function()
+        Tab:Input({
+            Title = "ชื่อปืนที่ตก (ตั้งเอง ถ้าหาไม่เจอ)",
+            Value = "",
+            Placeholder = "เช่น GunDrop",
+            Callback = function(text)
+                gunNameOverride = (text ~= "" and text) or nil
+                gunCache = nil
+                gunScanAt = 0
+            end,
+        })
+    end)
+
+    -- ---------- ยิงฆาตกร ----------
+    Tab:Button({
+        Title = "ยิงฆาตกร (กดครั้งเดียว)",
+        Callback = function()
+            local ok, why = shootMurderer()
+            notify(ok and "ยิงฆาตกรแล้ว" or (why or "ยิงไม่ได้"))
+        end,
+    })
+
+    Tab:Toggle({
+        Title = "ปุ่มลอยยิงฆาตกร",
+        Value = false,
+        Callback = function(state)
+            if shootGui then shootGui.Enabled = state end
+        end,
+    })
+
+    local autoShoot = false
+    Tab:Toggle({
+        Title = "ออโต้ยิงฆาตกร",
+        Value = false,
+        Callback = function(state)
+            autoShoot = state
+            flags.autoShoot = state
+        end,
+    })
+
+    task.spawn(function()
+        while alive do
+            task.wait(0.6)
+            if autoShoot and hasTool(player, "Gun") then
+                pcall(shootMurderer)
+            end
+        end
+    end)
+end)
+
+-- ==================================================
+-- แท็บ: ฆาตกร
+-- ==================================================
+safe("ฆาตกร", function()
+    local Tab = Window:Tab({ Title = "ฆาตกร", Icon = "swords" })
+
+    Tab:Button({
+        Title = "ขว้างมีดใส่คนใกล้สุด (กดครั้งเดียว)",
+        Callback = function()
+            local ok, why = throwKnife()
+            notify(ok and "ขว้างมีดแล้ว" or (why or "ขว้างมีดไม่ได้"))
+        end,
+    })
+
+    Tab:Toggle({
+        Title = "ปุ่มลอยขว้างมีด",
+        Value = false,
+        Callback = function(state)
+            if knifeGui then knifeGui.Enabled = state end
+        end,
+    })
+
+    local autoThrow = false
+    Tab:Toggle({
+        Title = "ขว้างมีดอัตโนมัติ",
+        Value = false,
+        Callback = function(state)
+            autoThrow = state
+            flags.autoThrow = state
+        end,
+    })
+
+    task.spawn(function()
+        while alive do
+            task.wait(1.5)
+            if autoThrow and hasTool(player, "Knife") then
+                pcall(throwKnife)
+            end
+        end
+    end)
+end)
+
+-- [จบส่วนที่ 4/6]
+
+-- ==================================================
+-- แท็บ: ESP
+-- ==================================================
+safe("ESP", function()
+    local Tab = Window:Tab({ Title = "ESP", Icon = "scan-eye" })
+
+    local ROLE_COLORS = {
+        Innocent = Color3.fromRGB(0, 255, 0),
+        Sheriff  = Color3.fromRGB(0, 120, 255),
+        Murderer = Color3.fromRGB(255, 0, 0),
+        Hero     = Color3.fromRGB(255, 255, 0),
+    }
+    local ROLE_TEXT = {
+        Innocent = "ผู้บริสุทธิ์",
+        Sheriff  = "นายอำเภอ",
+        Murderer = "ฆาตกร",
+        Hero     = "ฮีโร่",
+    }
+
+    local espOn = false
+    local showName, showProfile, showDist, showHealth = true, true, true, false
+    local showRole = { Innocent = true, Sheriff = true, Murderer = true, Hero = true }
+    local gunEspOn, coinEspOn = false, false
+
+    local espObjects, tracers, coinEsps = {}, {}, {}
+    local gunEsp = nil
+    local tracerConn = nil
+
+    removeOld("ZenithESP")
+    local espParent = workspace.CurrentCamera
+    pcall(function()
+        local cg = game:GetService("CoreGui")
+        local test = Instance.new("Folder")
+        test.Parent = cg
+        if test.Parent == cg then espParent = cg end
+        test:Destroy()
+    end)
+    local espFolder = Instance.new("Folder")
+    espFolder.Name = "ZenithESP"
+    espFolder.Parent = espParent
+
+    local function clearESP(p)
+        local obj = espObjects[p]
+        if obj then
+            if obj.highlight then obj.highlight:Destroy() end
+            if obj.gui then obj.gui:Destroy() end
+            espObjects[p] = nil
+        end
+    end
+
+    local function clearAllESP()
+        for p in pairs(espObjects) do clearESP(p) end
+    end
+
+    local function createESP(p, char, head)
+        local highlight = Instance.new("Highlight")
+        highlight.Adornee = char
+        highlight.FillTransparency = 0.5
+        highlight.OutlineTransparency = 0
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Parent = espFolder
+
+        local gui = Instance.new("BillboardGui")
+        gui.Adornee = head
+        gui.Size = UDim2.fromOffset(140, 100)
+        gui.StudsOffset = Vector3.new(0, 3.5, 0)
+        gui.AlwaysOnTop = true
+        gui.Parent = espFolder
+
+        local image = Instance.new("ImageLabel")
+        image.Size = UDim2.fromOffset(44, 44)
+        image.Position = UDim2.new(0.5, -22, 0, 0)
+        image.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        image.Image = "rbxthumb://type=AvatarHeadShot&id=" .. p.UserId .. "&w=150&h=150"
+        image.Parent = gui
+        Instance.new("UICorner", image).CornerRadius = UDim.new(1, 0)
+        local stroke = Instance.new("UIStroke", image)
+        stroke.Thickness = 2
+
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, 0, 0, 52)
+        label.Position = UDim2.fromOffset(0, 46)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamBold
+        label.TextSize = 13
+        label.TextStrokeTransparency = 0.3
+        label.Parent = gui
+
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.Died:Connect(function() clearESP(p) end)
+        end
+        char.AncestryChanged:Connect(function(_, parent)
+            if not parent then clearESP(p) end
+        end)
+
+        espObjects[p] = {
+            char = char, highlight = highlight, gui = gui,
+            image = image, stroke = stroke, label = label,
+            color = Color3.new(1, 1, 1),
+        }
+    end
+
+    local function updateESP()
+        -- อ่านบทบาทได้ แต่ยังไม่เริ่มรอบ (ล็อบบี้) ให้ล้าง ESP
+        if rolesOk and not roundActive() then
+            clearAllESP()
+            return
+        end
+
+        local myRoot = getRoot()
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player then
+                local char = p.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local head = char and char:FindFirstChild("Head")
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local role = getRole(p) or "Innocent"
+
+                if not (hum and head and root and hum.Health > 0 and isAlive(p)) or not showRole[role] then
+                    clearESP(p)
+                else
+                    local obj = espObjects[p]
+                    if obj and obj.char ~= char then
+                        clearESP(p)
+                        obj = nil
+                    end
+                    if not obj then
+                        createESP(p, char, head)
+                        obj = espObjects[p]
+                    end
+
+                    local color = ROLE_COLORS[role]
+                    obj.color = color
+                    obj.highlight.FillColor = color
+                    obj.highlight.OutlineColor = color
+                    obj.stroke.Color = color
+                    obj.label.TextColor3 = color
+
+                    local lines = {}
+                    if showName then table.insert(lines, p.DisplayName) end
+                    table.insert(lines, "[" .. ROLE_TEXT[role] .. "]")
+                    if showDist and myRoot then
+                        table.insert(lines, math.floor((root.Position - myRoot.Position).Magnitude) .. " เมตร")
+                    end
+                    if showHealth then
+                        table.insert(lines, "เลือด " .. math.floor(hum.Health))
+                    end
+                    obj.label.Text = table.concat(lines, "\n")
+                    obj.image.Visible = showProfile
+                end
+            end
+        end
+    end
+
+    local function clearGunEsp()
+        if gunEsp then
+            gunEsp.box:Destroy()
+            gunEsp.highlight:Destroy()
+            gunEsp.gui:Destroy()
+            gunEsp = nil
+        end
+    end
+
+    local function clearCoinEsps()
+        for coin, b in pairs(coinEsps) do
+            b:Destroy()
+            coinEsps[coin] = nil
+        end
+    end
+
+    local function updateItemESP()
+        local drop = getGunPart()
+        if gunEspOn and drop then
+            if not gunEsp or gunEsp.drop ~= drop then
+                clearGunEsp()
+
+                local box = Instance.new("BoxHandleAdornment")
+                box.Adornee = drop
+                box.Size = drop.Size + Vector3.new(0.6, 0.6, 0.6)
+                box.Color3 = Color3.fromRGB(255, 255, 0)
+                box.Transparency = 0.3
+                box.AlwaysOnTop = true
+                box.ZIndex = 5
+                box.Parent = espFolder
+
+                local highlight = Instance.new("Highlight")
+                highlight.Adornee = drop
+                highlight.FillColor = Color3.fromRGB(255, 255, 0)
+                highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                highlight.Parent = espFolder
+
+                local gui = Instance.new("BillboardGui")
+                gui.Adornee = drop
+                gui.Size = UDim2.fromOffset(140, 40)
+                gui.StudsOffset = Vector3.new(0, 3, 0)
+                gui.AlwaysOnTop = true
+                gui.Parent = espFolder
+
+                local label = Instance.new("TextLabel")
+                label.Size = UDim2.fromScale(1, 1)
+                label.BackgroundTransparency = 1
+                label.Font = Enum.Font.GothamBold
+                label.TextSize = 15
+                label.TextColor3 = Color3.fromRGB(255, 255, 0)
+                label.TextStrokeTransparency = 0.2
+                label.Parent = gui
+
+                gunEsp = { drop = drop, box = box, highlight = highlight, gui = gui, label = label }
+            end
+            local root = getRoot()
+            local dist = root and math.floor((drop.Position - root.Position).Magnitude) or 0
+            gunEsp.label.Text = "🔫 ปืนที่ตก\n" .. dist .. " เมตร"
+        else
+            clearGunEsp()
+        end
+
+        if coinEspOn then
+            local current = {}
+            for _, coin in ipairs(getCoins()) do
+                current[coin] = true
+                if not coinEsps[coin] then
+                    local b = Instance.new("BoxHandleAdornment")
+                    b.Adornee = coin
+                    b.Size = Vector3.new(1.8, 1.8, 1.8)
+                    b.Color3 = Color3.fromRGB(255, 200, 0)
+                    b.Transparency = 0.25
+                    b.AlwaysOnTop = true
+                    b.ZIndex = 5
+                    b.Parent = espFolder
+                    coinEsps[coin] = b
+                end
+            end
+            for coin, b in pairs(coinEsps) do
+                if not current[coin] then
+                    b:Destroy()
+                    coinEsps[coin] = nil
+                end
+            end
+        else
+            clearCoinEsps()
+        end
+    end
+
+    local function updateTracers()
+        local cam = workspace.CurrentCamera
+        for p, line in pairs(tracers) do
+            if not espObjects[p] then
+                pcall(function() line:Remove() end)
+                tracers[p] = nil
+            end
+        end
+        for p, obj in pairs(espObjects) do
+            local root = obj.char and obj.char:FindFirstChild("HumanoidRootPart")
+            local line = tracers[p]
+            if not line then
+                line = Drawing.new("Line")
+                line.Thickness = 1.5
+                tracers[p] = line
+            end
+            if root then
+                local pos, onScreen = cam:WorldToViewportPoint(root.Position)
+                if onScreen then
+                    line.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+                    line.To = Vector2.new(pos.X, pos.Y)
+                    line.Color = obj.color
+                    line.Visible = true
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        end
+    end
+
+    task.spawn(function()
+        while alive and espFolder.Parent do
+            task.wait(0.25)
+            if espOn then pcall(updateESP) end
+            if gunEspOn or coinEspOn or gunEsp or next(coinEsps) then
+                pcall(updateItemESP)
+            end
+        end
+    end)
+
+    track(Players.PlayerRemoving:Connect(clearESP))
+
+    table.insert(cleanups, function()
+        if tracerConn then tracerConn:Disconnect() end
+        for _, line in pairs(tracers) do pcall(function() line:Remove() end) end
+    end)
+
+    -- ป้ายชี้ปืนบนหน้าจอ (เห็นแน่นอน แม้ไฮไลต์ไม่แสดง)
+    removeOld("ZenithGunHud")
+    local hud = Instance.new("ScreenGui")
+    hud.Name = "ZenithGunHud"
+    hud.ResetOnSpawn = false
+    hud.IgnoreGuiInset = true
+    hud.DisplayOrder = 50
+    hud.Parent = getGuiParent()
+
+    local marker = Instance.new("TextLabel")
+    marker.AnchorPoint = Vector2.new(0.5, 0.5)
+    marker.Size = UDim2.fromOffset(120, 44)
+    marker.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    marker.BackgroundTransparency = 0.4
+    marker.TextColor3 = Color3.fromRGB(255, 255, 0)
+    marker.Font = Enum.Font.GothamBold
+    marker.TextSize = 14
+    marker.Visible = false
+    marker.Parent = hud
+    Instance.new("UICorner", marker).CornerRadius = UDim.new(0, 10)
+
+    track(RunService.RenderStepped:Connect(function()
+        if not gunEspOn then
+            marker.Visible = false
+            return
+        end
+        local drop = getGunPart()
+        if not drop then
+            marker.Visible = false
+            return
+        end
+        local cam = workspace.CurrentCamera
+        local vs = cam.ViewportSize
+        local pos = cam:WorldToViewportPoint(drop.Position)
+        local x, y = pos.X, pos.Y
+        if pos.Z < 0 then x, y = vs.X - x, vs.Y - y end
+        x = math.clamp(x, 70, vs.X - 70)
+        y = math.clamp(y, 60, vs.Y - 60)
+        local root = getRoot()
+        local dist = root and math.floor((drop.Position - root.Position).Magnitude) or 0
+        marker.Position = UDim2.fromOffset(x, y)
+        marker.Text = "🔫 ปืนตก\n" .. dist .. " เมตร"
+        marker.Visible = true
+    end))
+
+    Tab:Toggle({
+        Title = "เปิด ESP ผู้เล่น",
+        Value = false,
+        Callback = function(state)
+            espOn = state
+            flags.esp = state
+            if not state then
+                clearAllESP()
+            else
+                task.delay(2.5, function()
+                    if espOn and not rolesOk then
+                        notify("อ่านบทบาทจากเกมไม่ได้ ใช้โหมดสำรอง (บทบาทอาจไม่แม่น)", 5)
+                    end
+                end)
+            end
+        end,
+    })
+    Tab:Toggle({ Title = "แสดงชื่อ", Value = true, Callback = function(s) showName = s end })
+    Tab:Toggle({ Title = "แสดงรูปโปรไฟล์", Value = true, Callback = function(s) showProfile = s end })
+    Tab:Toggle({ Title = "แสดงระยะห่าง", Value = true, Callback = function(s) showDist = s end })
+    Tab:Toggle({ Title = "แสดงเลือด", Value = false, Callback = function(s) showHealth = s end })
+
+    Tab:Toggle({
+        Title = "เส้นชี้ตัว (Tracer)",
+        Value = false,
+        Callback = function(state)
+            if state then
+                if not Drawing then
+                    notify("ตัวรันนี้ไม่รองรับเส้น Tracer")
+                    return
+                end
+                if not tracerConn then
+                    tracerConn = RunService.RenderStepped:Connect(function()
+                        pcall(updateTracers)
+                    end)
+                end
+            else
+                if tracerConn then
+                    tracerConn:Disconnect()
+                    tracerConn = nil
+                end
+                for p, line in pairs(tracers) do
+                    pcall(function() line:Remove() end)
+                    tracers[p] = nil
+                end
+            end
+        end,
+    })
+
+    Tab:Toggle({ Title = "แสดงเฉพาะ: ฆาตกร", Value = true, Callback = function(s) showRole.Murderer = s end })
+    Tab:Toggle({ Title = "แสดงเฉพาะ: นายอำเภอ", Value = true, Callback = function(s) showRole.Sheriff = s end })
+    Tab:Toggle({ Title = "แสดงเฉพาะ: ฮีโร่", Value = true, Callback = function(s) showRole.Hero = s end })
+    Tab:Toggle({ Title = "แสดงเฉพาะ: ผู้บริสุทธิ์", Value = true, Callback = function(s) showRole.Innocent = s end })
+
+    Tab:Toggle({ Title = "ESP ปืนที่ตก", Value = false, Callback = function(s) gunEspOn = s end })
+    Tab:Toggle({ Title = "ESP เหรียญ", Value = false, Callback = function(s) coinEspOn = s end })
+end)
+
+-- [จบส่วนที่ 5/6]
+
+-- ==================================================
+-- แท็บ: ฟาร์ม
+-- ==================================================
+safe("ฟาร์ม", function()
+    local Tab = Window:Tab({ Title = "ฟาร์ม", Icon = "coins" })
+
+    local farmOn, safeFarm, farmSpeed = false, true, 30
+
+    Tab:Toggle({
+        Title = "ฟาร์มเหรียญอัตโนมัติ",
+        Value = false,
+        Callback = function(state)
+            farmOn = state
+            flags.farm = state
+        end,
+    })
+    Tab:Toggle({
+        Title = "ฟาร์มแบบปลอดภัย (หลบฆาตกร)",
+        Value = true,
+        Callback = function(state) safeFarm = state end,
+    })
+    Tab:Slider({
+        Title = "ความเร็วฟาร์ม",
+        Value = { Min = 15, Max = 80, Default = 30 },
+        Callback = function(v) farmSpeed = v end,
+    })
+
+    task.spawn(function()
+        while alive do
+            task.wait(0.15)
+            if farmOn and not grabbing then
+                local root = getRoot()
+                local coins = root and getCoins() or {}
+                if root and #coins > 0 then
+                    local murderer = safeFarm and getMurderer()
+                    local mRoot = murderer and murderer.Character
+                        and murderer.Character:FindFirstChild("HumanoidRootPart")
+
+                    local best, bestDist
+                    for _, coin in ipairs(coins) do
+                        local ok = true
+                        if mRoot and (coin.Position - mRoot.Position).Magnitude < 30 then
+                            ok = false
+                        end
+                        if ok then
+                            local d = (coin.Position - root.Position).Magnitude
+                            if not bestDist or d < bestDist then
+                                best, bestDist = coin, d
+                            end
+                        end
+                    end
+
+                    if best then
+                        local dur = math.max(bestDist / farmSpeed, 0.1)
+                        local tw = TweenService:Create(
+                            root,
+                            TweenInfo.new(dur, Enum.EasingStyle.Linear),
+                            { CFrame = best.CFrame }
+                        )
+                        tw:Play()
+                        local t = 0
+                        while alive and t < dur + 0.25 and farmOn and root.Parent
+                            and best.Parent and best.Name == "Coin_Server" do
+                            task.wait(0.05)
+                            t += 0.05
+                        end
+                        tw:Cancel()
+                        if firetouchinterest and best.Parent then
+                            pcall(function()
+                                firetouchinterest(root, best, 0)
+                                firetouchinterest(root, best, 1)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end)
+
+-- ==================================================
+-- แท็บ: ตัวละคร
+-- ==================================================
+safe("ตัวละคร", function()
+    local Tab = Window:Tab({ Title = "ตัวละคร", Icon = "user" })
+
+    local speedValue, jumpValue, flySpeed = 16, 50, 50
+    local speedOn, jumpOn, flyOn, infJump = false, false, false, false
+    local flyBV, noclipConn
+
+    table.insert(cleanups, function()
+        if flyBV then flyBV:Destroy() end
+        if noclipConn then noclipConn:Disconnect() end
+    end)
+
+    Tab:Slider({
+        Title = "ความเร็วการเดิน",
+        Value = { Min = 16, Max = 100, Default = 16 },
+        Callback = function(v) speedValue = v end,
+    })
+    Tab:Toggle({
+        Title = "เปิดใช้ความเร็วเดิน",
+        Value = false,
+        Callback = function(state)
+            speedOn = state
+            if not state then
+                local h = getHumanoid()
+                if h then h.WalkSpeed = 16 end
+            end
+        end,
+    })
+
+    Tab:Slider({
+        Title = "แรงกระโดด",
+        Value = { Min = 50, Max = 150, Default = 50 },
+        Callback = function(v) jumpValue = v end,
+    })
+    Tab:Toggle({
+        Title = "เปิดใช้แรงกระโดด",
+        Value = false,
+        Callback = function(state)
+            jumpOn = state
+            if not state then
+                local h = getHumanoid()
+                if h then h.UseJumpPower = true h.JumpPower = 50 end
+            end
+        end,
+    })
+
+    Tab:Toggle({
+        Title = "กระโดดกลางอากาศไม่จำกัด",
+        Value = false,
+        Callback = function(state) infJump = state end,
+    })
+    track(UserInputService.JumpRequest:Connect(function()
+        if infJump then
+            local h = getHumanoid()
+            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+        end
+    end))
+
+    Tab:Slider({
+        Title = "ความเร็วบิน",
+        Value = { Min = 20, Max = 150, Default = 50 },
+        Callback = function(v) flySpeed = v end,
+    })
+    Tab:Toggle({
+        Title = "บิน (เดินไปทางที่กล้องมอง)",
+        Value = false,
+        Callback = function(state) flyOn = state end,
+    })
+
+    Tab:Toggle({
+        Title = "ทะลุกำแพง",
+        Value = false,
+        Callback = function(state)
+            if state and not noclipConn then
+                noclipConn = RunService.Stepped:Connect(function()
+                    local char = player.Character
+                    if char then
+                        for _, part in ipairs(char:GetChildren()) do
+                            if part:IsA("BasePart") then part.CanCollide = false end
+                        end
+                    end
+                end)
+            elseif not state and noclipConn then
+                noclipConn:Disconnect()
+                noclipConn = nil
+            end
+        end,
+    })
+
+    track(RunService.Heartbeat:Connect(function()
+        if not (speedOn or jumpOn or flyOn or flyBV) then return end
+        local h = getHumanoid()
+        local root = getRoot()
+
+        if h then
+            if speedOn then h.WalkSpeed = speedValue end
+            if jumpOn then
+                h.UseJumpPower = true
+                h.JumpPower = jumpValue
+            end
+        end
+
+        if flyOn and root and h then
+            if not flyBV or flyBV.Parent == nil then
+                flyBV = Instance.new("BodyVelocity")
+                flyBV.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+                flyBV.Velocity = Vector3.zero
+                flyBV.Parent = root
+            end
+            if h.MoveDirection.Magnitude > 0 then
+                flyBV.Velocity = workspace.CurrentCamera.CFrame.LookVector * flySpeed
+            else
+                flyBV.Velocity = Vector3.zero
+            end
+        elseif flyBV then
+            flyBV:Destroy()
+            flyBV = nil
+        end
+    end))
+end)
+
+-- ==================================================
+-- แท็บ: วาร์ป
+-- ==================================================
+safe("วาร์ป", function()
+    local Tab = Window:Tab({ Title = "วาร์ป", Icon = "map-pin" })
+
+    local function tpTo(part, msgFail)
+        local root = getRoot()
+        if root and part then
+            root.CFrame = part.CFrame + Vector3.new(0, 3, 0)
+        else
+            notify(msgFail)
+        end
+    end
+
+    Tab:Button({
+        Title = "วาร์ปไปล็อบบี้",
+        Callback = function()
+            local lobby = workspace:FindFirstChild("Lobby")
+            local spawns = lobby and lobby:FindFirstChild("Spawns")
+            local spawn = spawns and spawns:GetChildren()[1]
+            if spawn and spawn:IsA("BasePart") then
+                tpTo(spawn, "หาจุดเกิดล็อบบี้ไม่เจอ")
+            else
+                notify("หาจุดเกิดล็อบบี้ไม่เจอ")
+            end
+        end,
+    })
+
+    Tab:Button({
+        Title = "วาร์ปไปปืนที่ตก",
+        Callback = function()
+            tpTo(getGunPart(), "ปืนยังไม่ drop")
+        end,
+    })
+
+    Tab:Button({
+        Title = "วาร์ปไปหาฆาตกร",
+        Callback = function()
+            refreshRoles(true)
+            local m = getMurderer()
+            tpTo(m and m.Character and m.Character:FindFirstChild("HumanoidRootPart"), "ไม่เจอฆาตกร")
+        end,
+    })
+
+    Tab:Button({
+        Title = "วาร์ปไปหานายอำเภอ/ฮีโร่",
+        Callback = function()
+            refreshRoles(true)
+            local found
+            for _, p in ipairs(Players:GetPlayers()) do
+                local r = getRole(p)
+                if p ~= player and (r == "Sheriff" or r == "Hero") and isAlive(p) then
+                    found = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                    break
+                end
+            end
+            tpTo(found, "ไม่เจอนายอำเภอ/ฮีโร่")
+        end,
+    })
+
+    local selectedPlayer = nil
+    local function getPlayerNames()
+        local names = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player then table.insert(names, p.Name) end
+        end
+        if #names == 0 then names = { "(ไม่มีผู้เล่นคนอื่น)" } end
+        return names
+    end
+
+    local playerDropdown = Tab:Dropdown({
+        Title = "เลือกผู้เล่น",
+        Values = getPlayerNames(),
+        Callback = function(option) selectedPlayer = option end,
+    })
+
+    Tab:Button({
+        Title = "รีเฟรชรายชื่อผู้เล่น",
+        Callback = function()
+            pcall(function() playerDropdown:Refresh(getPlayerNames()) end)
+            notify("รีเฟรชรายชื่อแล้ว", 2)
+        end,
+    })
+
+    Tab:Button({
+        Title = "วาร์ปไปหาผู้เล่นที่เลือก",
+        Callback = function()
+            local target = selectedPlayer and Players:FindFirstChild(selectedPlayer)
+            local tRoot = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+            tpTo(tRoot, "ยังไม่ได้เลือกผู้เล่น หรือผู้เล่นไม่อยู่ในรอบ")
+        end,
+    })
+end)
+
+-- ==================================================
+-- แท็บ: อื่นๆ
+-- ==================================================
+safe("อื่นๆ", function()
+    local Tab = Window:Tab({ Title = "อื่นๆ", Icon = "settings" })
+
+    Tab:Button({
+        Title = "ตรวจระบบ (พิมพ์ผลที่ Console)",
+        Callback = function() pcall(dumpRemotes) end,
+    })
+
+    Tab:Slider({
+        Title = "มุมมองกล้อง (FOV)",
+        Value = { Min = 40, Max = 120, Default = math.floor(workspace.CurrentCamera.FieldOfView) },
+        Callback = function(v) workspace.CurrentCamera.FieldOfView = v end,
+    })
+
+    local originalLighting = {
+        Brightness = Lighting.Brightness,
+        ClockTime = Lighting.ClockTime,
+        FogEnd = Lighting.FogEnd,
+        GlobalShadows = Lighting.GlobalShadows,
+        Ambient = Lighting.Ambient,
+    }
+    Tab:Toggle({
+        Title = "แมพสว่าง (Fullbright)",
+        Value = false,
+        Callback = function(state)
+            if state then
+                Lighting.Brightness = 2
+                Lighting.ClockTime = 14
+                Lighting.FogEnd = 100000
+                Lighting.GlobalShadows = false
+                Lighting.Ambient = Color3.fromRGB(178, 178, 178)
+            else
+                for k, v in pairs(originalLighting) do Lighting[k] = v end
+            end
+        end,
+    })
+
+    Tab:Button({
+        Title = "ลดแลค (ลดกราฟฟิก)",
+        Callback = function()
+            task.spawn(function()
+                settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+                Lighting.GlobalShadows = false
+                local count = 0
+                for _, v in ipairs(workspace:GetDescendants()) do
+                    if v:IsA("BasePart") then
+                        v.Material = Enum.Material.SmoothPlastic
+                        v.CastShadow = false
+                    elseif v:IsA("Decal") or v:IsA("Texture") then
+                        v.Transparency = 1
+                    elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke")
+                        or v:IsA("Fire") or v:IsA("Sparkles") then
+                        v.Enabled = false
+                    end
+                    count += 1
+                    if count % 300 == 0 then task.wait() end
+                end
+                notify("ลดกราฟฟิกเรียบร้อย")
+            end)
+        end,
+    })
+
+    local antiAfk = false
+    Tab:Toggle({
+        Title = "กันโดนเตะ (Anti-AFK)",
+        Value = false,
+        Callback = function(state) antiAfk = state end,
+    })
+    track(player.Idled:Connect(function()
+        if antiAfk then
+            local vu = game:GetService("VirtualUser")
+            vu:CaptureController()
+            vu:ClickButton2(Vector2.new())
+        end
+    end))
+
+    Tab:Button({
+        Title = "เข้าเซิร์ฟเวอร์ใหม่",
+        Callback = function()
+            game:GetService("TeleportService"):Teleport(game.PlaceId, player)
+        end,
+    })
+end)
+
+pcall(function() Window:SelectTab(1) end)
+print("[Zenith Hub] โหลดครบทุกแท็บแล้ว")
+
+-- [จบส่วนที่ 6/6]

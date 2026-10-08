@@ -662,7 +662,7 @@ safe("ปุ่มลอย", function()
     shootGui = makeFloatingButton({
         name = "ZenithShootGui",
         text = "ยิงฆาตกร",
-        icon = "rbxthumb://type=Asset&id=121555871790008&w=150&h=150",
+        image = "rbxthumb://type=Asset&id=121555871790008&w=150&h=150",
         top = Color3.fromRGB(255, 80, 90),
         bottom = Color3.fromRGB(150, 10, 30),
         glow = Color3.fromRGB(255, 40, 60),
@@ -677,7 +677,7 @@ safe("ปุ่มลอย", function()
     knifeGui = makeFloatingButton({
         name = "ZenithKnifeGui",
         text = "ขว้างมีด",
-        icon = "rbxthumb://type=Asset&id=127118286876611&w=150&h=150",
+        image = "rbxthumb://type=Asset&id=127118286876611&w=150&h=150",
         top = Color3.fromRGB(190, 90, 255),
         bottom = Color3.fromRGB(80, 20, 150),
         glow = Color3.fromRGB(170, 70, 255),
@@ -690,7 +690,9 @@ safe("ปุ่มลอย", function()
     })
 end)
 
--- [จบส่วนที่ 3/6]-- ==================================================
+-- [จบส่วนที่ 3/6]
+
+-- ==================================================
 -- ธีมสีฟ้า (ถ้าเวอร์ชัน WindUI ไม่รองรับ จะใช้ธีม Dark แทน)
 -- ==================================================
 local themeName = "Dark"

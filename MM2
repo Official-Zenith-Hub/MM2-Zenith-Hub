@@ -1,4 +1,4 @@
---[[ Zenith Hub MM2 (WindUI) - ภาษาไทย v7 ]]
+ๅ--[[ Zenith Hub MM2 (WindUI) - ภาษาไทย v7 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -519,14 +519,14 @@ local function makeFloatingButton(cfg)
         ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255)),
     })
 
-    local icon = Instance.new("TextLabel")
-    icon.BackgroundTransparency = 1
-    icon.Size = UDim2.new(1, 0, 0.55, 0)
-    icon.Position = UDim2.fromScale(0, 0.08)
-    icon.Text = cfg.icon
-    icon.TextSize = 30
-    icon.Font = Enum.Font.GothamBold
-    icon.Parent = btn
+    -- แสดงผลด้วย ImageLabel สำหรับใส่ Asset ID รูปภาพ
+    local imageLabel = Instance.new("ImageLabel")
+    imageLabel.BackgroundTransparency = 1
+    imageLabel.Size = UDim2.fromOffset(38, 38)
+    imageLabel.Position = UDim2.fromScale(0.5, 0.35)
+    imageLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+    imageLabel.Image = cfg.image or ""
+    imageLabel.Parent = btn
 
     local label = Instance.new("TextLabel")
     label.BackgroundTransparency = 1

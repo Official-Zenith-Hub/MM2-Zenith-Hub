@@ -1503,6 +1503,87 @@ safe("ESP", function()
 
     -- [จบ ESP ส่วน 1/2]
 
+    -- ==================== ESP กับดัก (ของฆาตกร) ====================
+    local trapEspOn, trapName, trapEsps = false, "trap", {}
+
+    local function clearTrapEsp(inst)
+        local e = trapEsps[inst]
+        if e then
+            e.box:Destroy()
+            e.gui:Destroy()
+            trapEsps[inst] = nil
+        end
+    end
+
+    local function clearAllTrapEsp()
+        for inst in pairs(trapEsps) do clearTrapEsp(inst) end
+    end
+
+    local function getTrapPart(inst)
+        if inst:IsA("BasePart") then return inst end
+        return inst:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    local function updateTraps()
+        local found = {}
+        local myRoot = getRoot()
+        for _, inst in ipairs(workspace:GetChildren()) do
+            if (inst:IsA("BasePart") or inst:IsA("Model"))
+                and inst.Name:lower():find(trapName, 1, true) then
+                local part = getTrapPart(inst)
+                if part then
+                    found[inst] = true
+                    local e = trapEsps[inst]
+                    if not e then
+                        local box = Instance.new("BoxHandleAdornment")
+                        box.Adornee = part
+                        box.Size = part.Size + Vector3.new(0.8, 0.8, 0.8)
+                        box.Color3 = Color3.fromRGB(255, 60, 60)
+                        box.Transparency = 0.3
+                        box.AlwaysOnTop = true
+                        box.ZIndex = 5
+                        box.Parent = espFolder
+
+                        local gui = Instance.new("BillboardGui")
+                        gui.Adornee = part
+                        gui.Size = UDim2.fromOffset(120, 36)
+                        gui.StudsOffset = Vector3.new(0, 2.5, 0)
+                        gui.AlwaysOnTop = true
+                        gui.Parent = espFolder
+
+                        local label = Instance.new("TextLabel")
+                        label.Size = UDim2.fromScale(1, 1)
+                        label.BackgroundTransparency = 1
+                        label.Font = Enum.Font.GothamBold
+                        label.TextSize = 14
+                        label.TextColor3 = Color3.fromRGB(255, 90, 90)
+                        label.TextStrokeTransparency = 0.2
+                        label.Parent = gui
+
+                        e = { box = box, gui = gui, label = label }
+                        trapEsps[inst] = e
+                    end
+                    local dist = myRoot and math.floor((part.Position - myRoot.Position).Magnitude) or 0
+                    e.label.Text = "⚠️ กับดัก\n" .. dist .. " เมตร"
+                end
+            end
+        end
+        for inst in pairs(trapEsps) do
+            if not found[inst] or not inst.Parent then clearTrapEsp(inst) end
+        end
+    end
+
+    task.spawn(function()
+        while alive and espFolder.Parent do
+            task.wait(0.4)
+            if trapEspOn then
+                pcall(updateTraps)
+            elseif next(trapEsps) then
+                clearAllTrapEsp()
+            end
+        end
+    end)
+
     -- ==================== ปุ่ม/สวิตช์ในเมนู ====================
     Tab:Toggle({
         Title = "เปิด ESP ผู้เล่น",
@@ -1560,6 +1641,45 @@ safe("ESP", function()
 
     Tab:Toggle({ Title = "ESP ปืนที่ตก", Value = false, Callback = function(s) gunEspOn = s end })
     Tab:Toggle({ Title = "ESP เหรียญ", Value = false, Callback = function(s) coinEspOn = s end })
+
+    -- ---------- ESP กับดัก: สวิตช์ + ตั้งชื่อเอง + ตรวจหา ----------
+    Tab:Toggle({
+        Title = "ESP กับดักฆาตกร",
+        Value = false,
+        Callback = function(state) trapEspOn = state end,
+    })
+
+    pcall(function()
+        Tab:Input({
+            Title = "ชื่อกับดัก (ตั้งเอง ถ้าหาไม่เจอ)",
+            Value = "Trap",
+            Placeholder = "เช่น Trap",
+            Callback = function(text)
+                trapName = ((text ~= "" and text) or "Trap"):lower()
+                clearAllTrapEsp()
+            end,
+        })
+    end)
+
+    Tab:Button({
+        Title = "ตรวจหากับดัก (พิมพ์ที่ Console)",
+        Callback = function()
+            task.spawn(function()
+                print("===== Zenith Hub: ตรวจหากับดัก =====")
+                local n = 0
+                for i, c in ipairs(workspace:GetDescendants()) do
+                    if (c:IsA("BasePart") or c:IsA("Model"))
+                        and c.Name:lower():find("trap", 1, true) then
+                        print("  ", c:GetFullName(), "[" .. c.ClassName .. "]")
+                        n += 1
+                    end
+                    if i % 500 == 0 then task.wait() end
+                end
+                print("เจอทั้งหมด", n, "ชิ้น")
+                notify("พิมพ์ผลตรวจที่ Console แล้ว")
+            end)
+        end,
+    })
 
     -- ---------- ตั้งค่าฮิตบล็อก (วาดกล่อง) ----------
     Tab:Toggle({
@@ -1932,11 +2052,60 @@ safe("วาร์ป", function()
 end)
 
 -- ==================================================
--- แท็บ: อื่นๆ
+-- แท็บ: การตั้งค่า
 -- ==================================================
-safe("อื่นๆ", function()
-    local Tab = Window:Tab({ Title = "อื่นๆ", Icon = "settings" })
+safe("การตั้งค่า", function()
+    local Tab = Window:Tab({ Title = "การตั้งค่า", Icon = "settings" })
 
+    -- ---------- บันทึกการตั้งค่า (ต้องวางแพตช์ระบบบันทึกในส่วนที่ 1 ก่อน) ----------
+    if saveSettings then
+        Tab:Button({
+            Title = "💾 บันทึกการตั้งค่า",
+            Callback = function()
+                local ok, why = saveSettings()
+                dirty = false
+                notify(ok and "บันทึกการตั้งค่าแล้ว (ปุ่มที่เปิดไว้จะเปิดเองตอนรันรอบหน้า)" or (why or "บันทึกไม่ได้"), 4)
+            end,
+        })
+
+        Tab:Toggle({
+            Title = "บันทึกอัตโนมัติทุกครั้งที่เปลี่ยนค่า",
+            Value = autoSave,
+            Callback = function(state)
+                autoSave = state
+                pcall(function()
+                    if writefile then writefile(AUTOSAVE_FILE, state and "1" or "0") end
+                end)
+            end,
+        })
+
+        Tab:Toggle({
+            Title = "โหลดการตั้งค่าที่บันทึกไว้ตอนเปิดสคริปต์",
+            Value = autoLoad,
+            Callback = function(state)
+                autoLoad = state
+                pcall(function()
+                    if writefile then writefile(AUTO_FILE, state and "1" or "0") end
+                end)
+            end,
+        })
+
+        Tab:Button({
+            Title = "ลบการตั้งค่าที่บันทึกไว้",
+            Callback = function()
+                currentSettings = {}
+                dirty = false
+                pcall(function()
+                    if delfile and isfile and isfile(SETTINGS_FILE) then delfile(SETTINGS_FILE) end
+                end)
+                notify("ลบการตั้งค่าที่บันทึกไว้แล้ว", 3)
+            end,
+        })
+    else
+        warn("[Zenith Hub] ยังไม่ได้วางแพตช์ระบบบันทึกการตั้งค่าในส่วนที่ 1")
+    end
+
+    -- ---------- เครื่องมือทั่วไป ----------
     Tab:Button({
         Title = "ตรวจระบบ (พิมพ์ผลที่ Console)",
         Callback = function() pcall(dumpRemotes) end,
